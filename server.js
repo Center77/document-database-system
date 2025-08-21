@@ -206,7 +206,38 @@ class DocumentDatabaseSystem {
     this.app.get('/api/databases', (req, res) => {
       res.json({ databases: this.databases });
     });
-
+    // MCP API endpoint for Claude Desktop
+    this.app.post('/api/mcp', async (req, res) => {
+      try {
+        const { method, params } = req.body;
+        
+        if (method === 'tools/list') {
+          res.json({
+            tools: [
+              {
+                name: 'get_system_stats',
+                description: 'Get system statistics',
+                inputSchema: { type: 'object', properties: {} }
+              },
+              {
+                name: 'get_all_documents',
+                description: 'Get all documents',
+                inputSchema: { type: 'object', properties: {} }
+              }
+            ]
+          });
+        } else {
+          res.json({
+            content: [{
+              type: 'text',
+              text: 'MCP endpoint working! Your document system is at: https://document-database-system.onrender.com'
+            }]
+          });
+        }
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
     // Document upload endpoint
     this.app.post('/api/upload-document', this.upload.single('document'), async (req, res) => {
       try {
