@@ -12,6 +12,623 @@ import csvParser from 'csv-parser';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+// ADD THIS TO YOUR server.js FILE - MCP Integration
+
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+
+// Add this to your DocumentDatabaseSystem class constructor
+class DocumentDatabaseSystem {
+  constructor() {
+    this.app = express();
+    this.db = null;
+    this.databases = ['customers', 'inventory', 'orders', 'employees'];
+    
+    // Initialize MCP Server
+    this.mcpServer = new Server(
+      {
+        name: 'document-database-server',
+        version: '1.0.0',
+      },
+      {
+        capabilities: {
+          resources: {},
+          tools: {},
+          prompts: {},
+        },
+      }
+    );
+    
+    this.setupExpress();
+    this.setupDatabase();
+    this.setupMCPHandlers();
+  }
+
+  // Add this new method to setup MCP handlers
+  setupMCPHandlers() {
+    // Tool for extracting document data
+    this.mcpServer.setRequestHandler('tools/call', async (request) => {
+      const { name, arguments: args } = request.params;
+
+      switch (name) {
+        case 'query_database':
+          return await this.handleQueryDatabase(args);
+        case 'get_all_documents':
+          return await this.handleGetAllDocuments(args);
+        case 'get_all_forms':
+          return await this.handleGetAllForms(args);
+        case 'get_form_submissions':
+          return await this.handleGetFormSubmissions(args);
+        case 'create_form':
+          return await this.handleCreateForm(args);
+        case 'upload_document':
+          return await this.handleUploadDocument(args);
+        case 'get_system_stats':
+          return await this.handleGetSystemStats(args);
+        default:
+          throw new Error(`Unknown tool: ${name}`);
+      }
+    });
+
+    // List available tools for Claude
+    this.mcpServer.setRequestHandler('tools/list', async () => {
+      return {
+        tools: [
+          {
+            name: 'query_database',
+            description: 'Query documents and form data by database, date range, or content',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                database: { 
+                  type: 'string', 
+                  description: 'Database name (customers, inventory, orders, employees)',
+                  enum: ['customers', 'inventory', 'orders', 'employees']
+                },
+                query_type: { 
+                  type: 'string', 
+                  description: 'Type of query',
+                  enum: ['documents', 'forms', 'submissions', 'all']
+                },
+                date_from: { 
+                  type: 'string', 
+                  description: 'Start date filter (YYYY-MM-DD)' 
+                },
+                date_to: { 
+                  type: 'string', 
+                  description: 'End date filter (YYYY-MM-DD)' 
+                },
+                search_term: { 
+                  type: 'string', 
+                  description: 'Search in document names or form names' 
+                }
+              },
+              required: ['database']
+            }
+          },
+          {
+            name: 'get_all_documents',
+            description: 'Get all uploaded documents with their metadata and extracted data',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                limit: { 
+                  type: 'number', 
+                  description: 'Maximum number of documents to return (default: 50)' 
+                },
+                database: { 
+                  type: 'string', 
+                  description: 'Filter by specific database' 
+                }
+              }
+            }
+          },
+          {
+            name: 'get_all_forms',
+            description: 'Get all created forms with their fields and submission counts',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                database: { 
+                  type: 'string', 
+                  description: 'Filter by specific database' 
+                },
+                include_fields: { 
+                  type: 'boolean', 
+                  description: 'Include detailed field information (default: true)' 
+                }
+              }
+            }
+          },
+          {
+            name: 'get_form_submissions',
+            description: 'Get all submissions for a specific form or all forms',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                form_id: { 
+                  type: 'string', 
+                  description: 'Specific form ID (optional)' 
+                },
+                database: { 
+                  type: 'string', 
+                  description: 'Filter by database' 
+                },
+                limit: { 
+                  type: 'number', 
+                  description: 'Maximum submissions to return (default: 100)' 
+                }
+              }
+            }
+          },
+          {
+            name: 'create_form',
+            description: 'Create a new form with specified fields',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                name: { 
+                  type: 'string', 
+                  description: 'Form name' 
+                },
+                database: { 
+                  type: 'string', 
+                  description: 'Target database',
+                  enum: ['customers', 'inventory', 'orders', 'employees']
+                },
+                fields: {
+                  type: 'array',
+                  description: 'Form fields configuration',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      name: { type: 'string' },
+                      label: { type: 'string' },
+                      type: { type: 'string' },
+                      required: { type: 'boolean' },
+                      placeholder: { type: 'string' }
+                    },
+                    required: ['name', 'label', 'type']
+                  }
+                }
+              },
+              required: ['name', 'database', 'fields']
+            }
+          },
+          {
+            name: 'get_system_stats',
+            description: 'Get comprehensive system statistics and analytics',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                include_details: { 
+                  type: 'boolean', 
+                  description: 'Include detailed breakdown by database (default: true)' 
+                }
+              }
+            }
+          }
+        ]
+      };
+    });
+
+    console.log('✅ MCP handlers configured');
+  }
+
+  // MCP Handler Methods
+  async handleQueryDatabase(args) {
+    try {
+      const { database, query_type = 'all', date_from, date_to, search_term } = args;
+      
+      let results = {};
+      
+      // Build query conditions
+      let dateCondition = '';
+      let searchCondition = '';
+      const params = [];
+      
+      if (date_from || date_to) {
+        if (date_from && date_to) {
+          dateCondition = ' AND uploadDate BETWEEN ? AND ?';
+          params.push(date_from, date_to + ' 23:59:59');
+        } else if (date_from) {
+          dateCondition = ' AND uploadDate >= ?';
+          params.push(date_from);
+        } else if (date_to) {
+          dateCondition = ' AND uploadDate <= ?';
+          params.push(date_to + ' 23:59:59');
+        }
+      }
+      
+      if (search_term) {
+        searchCondition = ' AND (customName LIKE ? OR originalName LIKE ?)';
+        params.push(`%${search_term}%`, `%${search_term}%`);
+      }
+      
+      // Query documents
+      if (query_type === 'documents' || query_type === 'all') {
+        const docQuery = `SELECT * FROM documents WHERE database_name = ?${dateCondition}${searchCondition} ORDER BY uploadDate DESC`;
+        const documents = await this.queryDatabase(docQuery, [database, ...params]);
+        results.documents = documents;
+      }
+      
+      // Query forms
+      if (query_type === 'forms' || query_type === 'all') {
+        const formQuery = `SELECT * FROM forms WHERE database_name = ? ORDER BY createdDate DESC`;
+        const forms = await this.queryDatabase(formQuery, [database]);
+        results.forms = forms;
+      }
+      
+      // Query submissions
+      if (query_type === 'submissions' || query_type === 'all') {
+        const submissionQuery = `
+          SELECT fs.*, f.name as form_name 
+          FROM form_submissions fs 
+          JOIN forms f ON fs.formId = f.id 
+          WHERE f.database_name = ? 
+          ORDER BY fs.submissionDate DESC
+        `;
+        const submissions = await this.queryDatabase(submissionQuery, [database]);
+        results.submissions = submissions;
+      }
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              database: database,
+              query_type: query_type,
+              filters: { date_from, date_to, search_term },
+              results: results,
+              total_items: Object.values(results).reduce((sum, arr) => sum + (arr?.length || 0), 0)
+            }, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Error querying database: ${error.message}`
+          }
+        ]
+      };
+    }
+  }
+
+  async handleGetAllDocuments(args) {
+    try {
+      const { limit = 50, database } = args;
+      
+      let query = 'SELECT * FROM documents';
+      const params = [];
+      
+      if (database) {
+        query += ' WHERE database_name = ?';
+        params.push(database);
+      }
+      
+      query += ' ORDER BY uploadDate DESC LIMIT ?';
+      params.push(limit);
+      
+      const documents = await this.queryDatabase(query, params);
+      
+      // Parse extracted data for each document
+      const enrichedDocuments = documents.map(doc => {
+        if (doc.extractedData) {
+          try {
+            doc.extractedData = JSON.parse(doc.extractedData);
+          } catch (e) {
+            console.error('Error parsing extracted data:', e);
+          }
+        }
+        return doc;
+      });
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              total_documents: enrichedDocuments.length,
+              documents: enrichedDocuments
+            }, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Error retrieving documents: ${error.message}`
+          }
+        ]
+      };
+    }
+  }
+
+  async handleGetAllForms(args) {
+    try {
+      const { database, include_fields = true } = args;
+      
+      let query = `
+        SELECT f.*, 
+               COALESCE(s.submission_count, 0) as submissionCount
+        FROM forms f
+        LEFT JOIN (
+          SELECT formId, COUNT(*) as submission_count 
+          FROM form_submissions 
+          GROUP BY formId
+        ) s ON f.id = s.formId
+      `;
+      
+      const params = [];
+      if (database) {
+        query += ' WHERE f.database_name = ?';
+        params.push(database);
+      }
+      
+      query += ' ORDER BY f.createdDate DESC';
+      
+      const forms = await this.queryDatabase(query, params);
+      
+      // Parse fields if requested
+      const enrichedForms = forms.map(form => {
+        if (include_fields && form.fields) {
+          try {
+            form.fields = JSON.parse(form.fields);
+          } catch (e) {
+            console.error('Error parsing form fields:', e);
+          }
+        }
+        return form;
+      });
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              total_forms: enrichedForms.length,
+              forms: enrichedForms
+            }, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Error retrieving forms: ${error.message}`
+          }
+        ]
+      };
+    }
+  }
+
+  async handleGetFormSubmissions(args) {
+    try {
+      const { form_id, database, limit = 100 } = args;
+      
+      let query = `
+        SELECT fs.*, f.name as form_name, f.database_name
+        FROM form_submissions fs 
+        JOIN forms f ON fs.formId = f.id
+      `;
+      
+      const params = [];
+      const conditions = [];
+      
+      if (form_id) {
+        conditions.push('fs.formId = ?');
+        params.push(form_id);
+      }
+      
+      if (database) {
+        conditions.push('f.database_name = ?');
+        params.push(database);
+      }
+      
+      if (conditions.length > 0) {
+        query += ' WHERE ' + conditions.join(' AND ');
+      }
+      
+      query += ' ORDER BY fs.submissionDate DESC LIMIT ?';
+      params.push(limit);
+      
+      const submissions = await this.queryDatabase(query, params);
+      
+      // Parse submission data
+      const enrichedSubmissions = submissions.map(submission => {
+        if (submission.data) {
+          try {
+            submission.parsedData = JSON.parse(submission.data);
+          } catch (e) {
+            console.error('Error parsing submission data:', e);
+          }
+        }
+        return submission;
+      });
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              total_submissions: enrichedSubmissions.length,
+              submissions: enrichedSubmissions
+            }, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Error retrieving submissions: ${error.message}`
+          }
+        ]
+      };
+    }
+  }
+
+  async handleCreateForm(args) {
+    try {
+      const { name, database, fields } = args;
+      
+      const formId = uuidv4();
+      const webLink = `${process.env.RENDER_EXTERNAL_URL || 'https://document-database-system.onrender.com'}/form/${formId}`;
+      
+      const form = {
+        id: formId,
+        name: name,
+        fields: JSON.stringify(fields),
+        database_name: database,
+        webLink: webLink,
+        createdDate: new Date().toISOString(),
+        source: 'mcp_claude'
+      };
+      
+      await this.saveForm(form);
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              success: true,
+              form: {
+                id: formId,
+                name: name,
+                database: database,
+                webLink: webLink,
+                fieldCount: fields.length,
+                fields: fields
+              },
+              message: `Form '${name}' created successfully for ${database} database`
+            }, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Error creating form: ${error.message}`
+          }
+        ]
+      };
+    }
+  }
+
+  async handleGetSystemStats(args) {
+    try {
+      const { include_details = true } = args;
+      
+      // Get overall stats
+      const documentCount = await this.queryDatabase('SELECT COUNT(*) as count FROM documents', []);
+      const formCount = await this.queryDatabase('SELECT COUNT(*) as count FROM forms', []);
+      const submissionCount = await this.queryDatabase('SELECT COUNT(*) as count FROM form_submissions', []);
+      
+      const stats = {
+        overview: {
+          total_documents: documentCount[0].count,
+          total_forms: formCount[0].count,
+          total_submissions: submissionCount[0].count,
+          last_updated: new Date().toISOString()
+        }
+      };
+      
+      if (include_details) {
+        // Get stats by database
+        const dbStats = {};
+        
+        for (const db of this.databases) {
+          const docs = await this.queryDatabase('SELECT COUNT(*) as count FROM documents WHERE database_name = ?', [db]);
+          const forms = await this.queryDatabase('SELECT COUNT(*) as count FROM forms WHERE database_name = ?', [db]);
+          const subs = await this.queryDatabase(`
+            SELECT COUNT(*) as count 
+            FROM form_submissions fs 
+            JOIN forms f ON fs.formId = f.id 
+            WHERE f.database_name = ?
+          `, [db]);
+          
+          dbStats[db] = {
+            documents: docs[0].count,
+            forms: forms[0].count,
+            submissions: subs[0].count
+          };
+        }
+        
+        stats.by_database = dbStats;
+        
+        // Get recent activity
+        const recentDocs = await this.queryDatabase('SELECT customName, database_name, uploadDate FROM documents ORDER BY uploadDate DESC LIMIT 5', []);
+        const recentForms = await this.queryDatabase('SELECT name, database_name, createdDate FROM forms ORDER BY createdDate DESC LIMIT 5', []);
+        
+        stats.recent_activity = {
+          recent_documents: recentDocs,
+          recent_forms: recentForms
+        };
+      }
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(stats, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Error getting system stats: ${error.message}`
+          }
+        ]
+      };
+    }
+  }
+
+  // Helper method for database queries
+  async queryDatabase(query, params = []) {
+    return new Promise((resolve, reject) => {
+      this.db.all(query, params, (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows || []);
+      });
+    });
+  }
+
+  // Update the start method to include MCP server
+  async start() {
+    // Start Express server
+    const PORT = process.env.PORT || 3000;
+    this.app.listen(PORT, '0.0.0.0', () => {
+      console.log(`🚀 Document Database System running on port ${PORT}`);
+      console.log(`📊 Dashboard: http://localhost:${PORT}`);
+      console.log(`💾 Database: In-memory SQLite`);
+      console.log(`📁 File uploads: ./uploads/`);
+      console.log(`✅ System ready for use!`);
+    });
+
+    // Start MCP server if in MCP mode
+    if (process.env.MCP_MODE === 'true') {
+      const transport = new StdioServerTransport();
+      await this.mcpServer.connect(transport);
+      console.log('🔌 MCP Server connected and ready for Claude Pro');
+    }
+  }
+}
+
 
 class DocumentDatabaseSystem {
   constructor() {
