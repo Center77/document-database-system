@@ -775,7 +775,261 @@ class DocumentDatabaseSystem {
 </html>
     `;
   }
+// ADD THESE NEW ROUTES TO YOUR server.js FILE
 
+// Get specific form by ID
+app.get('/api/forms/:formId', async (req, res) => {
+  try {
+    const { formId } = req.params;
+    const form = await this.getForm(formId);
+    
+    if (!form) {
+      return res.status(404).json({ error: 'Form not found' });
+    }
+
+    // Parse fields
+    if (form.fields) {
+      try {
+        form.fields = JSON.parse(form.fields);
+      } catch (e) {
+        console.error('Error parsing form fields:', e);
+      }
+    }
+
+    res.json({ success: true, form });
+  } catch (error) {
+    console.error('Get form error:', error);
+    res.status(500).json({ error: 'Failed to retrieve form' });
+  }
+});
+
+// Update existing form
+app.put('/api/forms/:formId', async (req, res) => {
+  try {
+    const { formId } = req.params;
+    const { name, fields, database } = req.body;
+
+    if (!name || !fields || !database) {
+      return res.status(400).json({ error: 'Name, fields, and database are required' });
+    }
+
+    const existingForm = await this.getForm(formId);
+    if (!existingForm) {
+      return res.status(404).json({ error: 'Form not found' });
+    }
+
+    // Update the form
+    await this.updateForm(formId, {
+      name: name,
+      fields: JSON.stringify(fields),
+      database_name: database
+    });
+
+    res.json({
+      success: true,
+      message: 'Form updated successfully'
+    });
+
+  } catch (error) {
+    console.error('Form update error:', error);
+    res.status(500).json({ 
+      error: 'Failed to update form',
+      details: error.message 
+    });
+  }
+});
+
+// Delete form
+app.delete('/api/forms/:formId', async (req, res) => {
+  try {
+    const { formId } = req.params;
+    
+    const form = await this.getForm(formId);
+    if (!form) {
+      return res.status(404).json({ error: 'Form not found' });
+    }
+
+    // Delete form and all its submissions
+    await this.deleteForm(formId);
+
+    res.json({
+      success: true,
+      message: 'Form deleted successfully'
+    });
+
+  } catch (error) {
+    console.error('Form deletion error:', error);
+    res.status(500).json({ 
+      error: 'Failed to delete form',
+      details: error.message 
+    });
+  }
+});
+
+// Get form submissions
+app.get('/api/forms/:formId/submissions', async (req, res) => {
+  try {
+    const { formId } = req.params;
+    
+    const form = await this.getForm(formId);
+    if (!form) {
+      return res.status(404).json({ error: 'Form not found' });
+    }
+
+    const submissions = await this.getFormSubmissions(formId);
+
+    res.json({
+      success: true,
+      form: form,
+      submissions: submissions
+    });
+
+  } catch (error) {
+    console.error('Get submissions error:', error);
+    res.status(500).json({ 
+      error: 'Failed to retrieve submissions',
+      details: error.message 
+    });
+  }
+});
+
+// ADD THESE NEW METHODS TO YOUR DocumentDatabaseSystem CLASS
+
+async updateForm(formId, formData) {
+  return new Promise((resolve, reject) => {
+    const query = `
+      UPDATE forms 
+      SET name = ?, fields = ?, database_name = ?
+      WHERE id = ?
+    `;
+    
+    this.db.run(query, [
+      formData.name,
+      formData.fields,
+      formData.database_name,
+      formId
+    ], function(err) {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+}
+
+async deleteForm(formId) {
+  return new Promise((resolve, reject) => {
+    // First delete all submissions for this form
+    this.db.run('DELETE FROM form_submissions WHERE formId = ?', [formId], (err) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      
+      // Then delete the form itself
+      this.db.run('DELETE FROM forms WHERE id = ?', [formId], function(err) {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+  });
+}
+
+async getFormSubmissions(formId) {
+  return new Promise((resolve, reject) => {
+    this.db.all(
+      'SELECT * FROM form_submissions WHERE formId = ? ORDER BY submissionDate DESC', 
+      [formId], 
+      (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows || []);
+      }
+    );
+  });
+}
+
+// UPDATE THE EXISTING saveFormSubmission METHOD TO TRACK SUBMISSION COUNT
+
+async saveFormSubmission(formId, formData, ipAddress) {
+  return new Promise((resolve, reject) => {
+    // Save the submission
+    const query = `
+      INSERT INTO form_submissions (formId, data, submissionDate, ipAddress)
+      VALUES (?, ?, ?, ?)
+    `;
+    
+    this.db.run(query, [
+      formId,
+      JSON.stringify(formData),
+      new Date().toISOString(),
+      ipAddress
+    ], (err) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      
+      // Update submission count in forms table
+      this.db.run(
+        'UPDATE forms SET submissionCount = submissionCount + 1 WHERE id = ?',
+        [formId],
+        function(updateErr) {
+          if (updateErr) {
+            console.error('Error updating submission count:', updateErr);
+          }
+          resolve();
+        }
+      );
+    });
+  });
+}
+
+// UPDATE THE FORMS TABLE CREATION TO INCLUDE SUBMISSION COUNT
+
+// In your setupDatabase() method, update the forms table creation:
+this.db.run(`CREATE TABLE IF NOT EXISTS forms (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  fields TEXT NOT NULL,
+  database_name TEXT NOT NULL,
+  webLink TEXT NOT NULL,
+  createdDate TEXT NOT NULL,
+  source TEXT DEFAULT 'manual',
+  submissionCount INTEGER DEFAULT 0
+)`);
+
+// ADD THIS METHOD TO GET ENHANCED FORMS DATA
+
+async getAllForms() {
+  return new Promise((resolve, reject) => {
+    const query = `
+      SELECT f.*, 
+             COALESCE(s.submission_count, 0) as submissionCount
+      FROM forms f
+      LEFT JOIN (
+        SELECT formId, COUNT(*) as submission_count 
+        FROM form_submissions 
+        GROUP BY formId
+      ) s ON f.id = s.formId
+      ORDER BY f.createdDate DESC
+    `;
+    
+    this.db.all(query, (err, rows) => {
+      if (err) reject(err);
+      else {
+        const forms = (rows || []).map(form => {
+          if (form.fields) {
+            try {
+              form.fields = JSON.parse(form.fields);
+            } catch (e) {
+              console.error('Error parsing form fields:', e);
+            }
+          }
+          return form;
+        });
+        resolve(forms);
+      }
+    });
+  });
+}
   start() {
     const PORT = process.env.PORT || 3000;
     this.app.listen(PORT, '0.0.0.0', () => {
