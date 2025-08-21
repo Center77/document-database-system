@@ -176,28 +176,146 @@ class DocumentDatabaseSystem {
       });
     });
 
-    // MCP API endpoint for Claude Desktop
+    // SINGLE MCP API endpoint for Claude Desktop - FIXED VERSION
     this.app.post('/api/mcp', async (req, res) => {
       try {
         const { method, params } = req.body;
+        console.log('MCP Request:', method, params);
         
         let result;
         switch (method) {
           case 'tools/list':
-            result = await this.mcpServer.handleRequest({ method: 'tools/list' });
+            result = {
+              tools: [
+                {
+                  name: 'query_database',
+                  description: 'Query documents and form data by database, date range, or content',
+                  inputSchema: {
+                    type: 'object',
+                    properties: {
+                      database: { 
+                        type: 'string', 
+                        description: 'Database name (customers, inventory, orders, employees)',
+                        enum: ['customers', 'inventory', 'orders', 'employees']
+                      },
+                      query_type: { 
+                        type: 'string', 
+                        description: 'Type of query',
+                        enum: ['documents', 'forms', 'submissions', 'all']
+                      },
+                      search_term: { 
+                        type: 'string', 
+                        description: 'Search in document names or form names' 
+                      }
+                    },
+                    required: ['database']
+                  }
+                },
+                {
+                  name: 'get_all_documents',
+                  description: 'Get all uploaded documents with their metadata',
+                  inputSchema: {
+                    type: 'object',
+                    properties: {
+                      limit: { type: 'number', description: 'Maximum documents to return' },
+                      database: { type: 'string', description: 'Filter by database' }
+                    }
+                  }
+                },
+                {
+                  name: 'get_all_forms',
+                  description: 'Get all created forms with submission counts',
+                  inputSchema: {
+                    type: 'object',
+                    properties: {
+                      database: { type: 'string', description: 'Filter by database' }
+                    }
+                  }
+                },
+                {
+                  name: 'get_form_submissions',
+                  description: 'Get form submissions data',
+                  inputSchema: {
+                    type: 'object',
+                    properties: {
+                      form_id: { type: 'string', description: 'Specific form ID' },
+                      database: { type: 'string', description: 'Filter by database' }
+                    }
+                  }
+                },
+                {
+                  name: 'create_form',
+                  description: 'Create a new form with specified fields',
+                  inputSchema: {
+                    type: 'object',
+                    properties: {
+                      name: { type: 'string', description: 'Form name' },
+                      database: { type: 'string', enum: ['customers', 'inventory', 'orders', 'employees'] },
+                      fields: {
+                        type: 'array',
+                        items: {
+                          type: 'object',
+                          properties: {
+                            name: { type: 'string' },
+                            label: { type: 'string' },
+                            type: { type: 'string' },
+                            required: { type: 'boolean' }
+                          }
+                        }
+                      }
+                    },
+                    required: ['name', 'database', 'fields']
+                  }
+                },
+                {
+                  name: 'get_system_stats',
+                  description: 'Get comprehensive system statistics',
+                  inputSchema: {
+                    type: 'object',
+                    properties: {
+                      include_details: { type: 'boolean', description: 'Include detailed breakdown' }
+                    }
+                  }
+                }
+              ]
+            };
             break;
+            
           case 'tools/call':
-            result = await this.mcpServer.handleRequest({ 
-              method: 'tools/call', 
-              params: params 
-            });
+            const { name, arguments: args } = params;
+            switch (name) {
+              case 'query_database':
+                result = await this.handleQueryDatabase(args);
+                break;
+              case 'get_all_documents':
+                result = await this.handleGetAllDocuments(args);
+                break;
+              case 'get_all_forms':
+                result = await this.handleGetAllForms(args);
+                break;
+              case 'get_form_submissions':
+                result = await this.handleGetFormSubmissions(args);
+                break;
+              case 'create_form':
+                result = await this.handleCreateForm(args);
+                break;
+              case 'get_system_stats':
+                result = await this.handleGetSystemStats(args);
+                break;
+              default:
+                throw new Error(`Unknown tool: ${name}`);
+            }
             break;
+            
           default:
             throw new Error(`Unknown MCP method: ${method}`);
         }
         
+        console.log('MCP Response:', result);
         res.json(result);
+        
       } catch (error) {
+        console.error('MCP Error:', error);
         res.status(500).json({ error: error.message });
       }
     });
@@ -206,38 +324,7 @@ class DocumentDatabaseSystem {
     this.app.get('/api/databases', (req, res) => {
       res.json({ databases: this.databases });
     });
-    // MCP API endpoint for Claude Desktop
-    this.app.post('/api/mcp', async (req, res) => {
-      try {
-        const { method, params } = req.body;
-        
-        if (method === 'tools/list') {
-          res.json({
-            tools: [
-              {
-                name: 'get_system_stats',
-                description: 'Get system statistics',
-                inputSchema: { type: 'object', properties: {} }
-              },
-              {
-                name: 'get_all_documents',
-                description: 'Get all documents',
-                inputSchema: { type: 'object', properties: {} }
-              }
-            ]
-          });
-        } else {
-          res.json({
-            content: [{
-              type: 'text',
-              text: 'MCP endpoint working! Your document system is at: https://document-database-system.onrender.com'
-            }]
-          });
-        }
-      } catch (error) {
-        res.status(500).json({ error: error.message });
-      }
-    });
+
     // Document upload endpoint
     this.app.post('/api/upload-document', this.upload.single('document'), async (req, res) => {
       try {
