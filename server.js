@@ -955,4 +955,364 @@ class DocumentDatabaseSystem {
   async saveForm(form) {
     return new Promise((resolve, reject) => {
       const query = `INSERT INTO forms (id, name, fields, database_name, webLink, createdDate, source) VALUES (?, ?, ?, ?, ?, ?, ?)`;
-      this.db.run(
+      this.db.run(query, [form.id, form.name, form.fields, form.database_name, form.webLink, form.createdDate, form.source], function(err) {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+  }
+
+  async saveFormSubmission(formId, formData, ipAddress) {
+    return new Promise((resolve, reject) => {
+      const query = `INSERT INTO form_submissions (formId, data, submissionDate, ipAddress) VALUES (?, ?, ?, ?)`;
+      this.db.run(query, [formId, JSON.stringify(formData), new Date().toISOString(), ipAddress], (err) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        
+        // Update submission count
+        this.db.run('UPDATE forms SET submissionCount = submissionCount + 1 WHERE id = ?', [formId], function(updateErr) {
+          if (updateErr) console.error('Error updating submission count:', updateErr);
+          resolve();
+        });
+      });
+    });
+  }
+
+  async getForm(formId) {
+    return new Promise((resolve, reject) => {
+      this.db.get('SELECT * FROM forms WHERE id = ?', [formId], (err, row) => {
+        if (err) reject(err);
+        else resolve(row);
+      });
+    });
+  }
+
+  async getCSVData(csvId) {
+    return new Promise((resolve, reject) => {
+      this.db.get('SELECT * FROM csv_data WHERE id = ?', [csvId], (err, row) => {
+        if (err) reject(err);
+        else resolve(row);
+      });
+    });
+  }
+
+  async updateCSVFormGenerated(csvId) {
+    return new Promise((resolve, reject) => {
+      this.db.run('UPDATE csv_data SET formGenerated = 1 WHERE id = ?', [csvId], function(err) {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+  }
+
+  async updateForm(formId, formData) {
+    return new Promise((resolve, reject) => {
+      const query = `UPDATE forms SET name = ?, fields = ?, database_name = ? WHERE id = ?`;
+      this.db.run(query, [formData.name, formData.fields, formData.database_name, formId], function(err) {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+  }
+
+  async deleteForm(formId) {
+    return new Promise((resolve, reject) => {
+      // First delete all submissions for this form
+      this.db.run('DELETE FROM form_submissions WHERE formId = ?', [formId], (err) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        
+        // Then delete the form itself
+        this.db.run('DELETE FROM forms WHERE id = ?', [formId], function(err) {
+          if (err) reject(err);
+          else resolve();
+        });
+      });
+    });
+  }
+
+  async getFormSubmissions(formId) {
+    return new Promise((resolve, reject) => {
+      this.db.all('SELECT * FROM form_submissions WHERE formId = ? ORDER BY submissionDate DESC', [formId], (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows || []);
+      });
+    });
+  }
+
+  async getAllDocuments() {
+    return new Promise((resolve, reject) => {
+      this.db.all('SELECT * FROM documents ORDER BY uploadDate DESC', (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows || []);
+      });
+    });
+  }
+
+  async getAllForms() {
+    return new Promise((resolve, reject) => {
+      const query = `
+        SELECT f.*, COALESCE(s.submission_count, 0) as submissionCount
+        FROM forms f
+        LEFT JOIN (
+          SELECT formId, COUNT(*) as submission_count 
+          FROM form_submissions 
+          GROUP BY formId
+        ) s ON f.id = s.formId
+        ORDER BY f.createdDate DESC
+      `;
+      
+      this.db.all(query, (err, rows) => {
+        if (err) reject(err);
+        else {
+          const forms = (rows || []).map(form => {
+            if (form.fields) {
+              try {
+                form.fields = JSON.parse(form.fields);
+              } catch (e) {
+                console.error('Error parsing form fields:', e);
+              }
+            }
+            return form;
+          });
+          resolve(forms);
+        }
+      });
+    });
+  }
+
+  async getAllCSVData() {
+    return new Promise((resolve, reject) => {
+      this.db.all('SELECT * FROM csv_data ORDER BY uploadDate DESC', (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows || []);
+      });
+    });
+  }
+
+  async getHistory() {
+    return new Promise((resolve, reject) => {
+      this.db.all('SELECT * FROM history ORDER BY timestamp DESC LIMIT 50', (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows || []);
+      });
+    });
+  }
+
+  // Document processing methods
+  async extractDocumentData(filePath, mimeType) {
+    try {
+      const fileExtension = path.extname(filePath).toLowerCase();
+      
+      switch (fileExtension) {
+        case '.txt':
+          return await this.processTextFile(filePath);
+        case '.csv':
+          return await this.parseCSV(filePath);
+        default:
+          return {
+            text: 'File uploaded successfully',
+            metadata: {
+              fileType: fileExtension,
+              processed: true,
+              extractedAt: new Date().toISOString()
+            }
+          };
+      }
+    } catch (error) {
+      console.error('Document extraction error:', error);
+      return {
+        text: 'Error processing file',
+        metadata: {
+          error: error.message,
+          processed: false
+        }
+      };
+    }
+  }
+
+  async processTextFile(filePath) {
+    try {
+      const text = await fs.readFile(filePath, 'utf8');
+      return {
+        text: text,
+        metadata: {
+          fileType: 'text',
+          processed: true,
+          extractedAt: new Date().toISOString(),
+          length: text.length
+        }
+      };
+    } catch (error) {
+      throw new Error(`Failed to process text file: ${error.message}`);
+    }
+  }
+
+  async parseCSV(filePath) {
+    return new Promise((resolve, reject) => {
+      const results = [];
+      const headers = [];
+
+      createReadStream(filePath)
+        .pipe(csvParser())
+        .on('headers', (headerList) => {
+          headers.push(...headerList);
+        })
+        .on('data', (data) => {
+          results.push(data);
+        })
+        .on('end', () => {
+          resolve({
+            headers: headers,
+            data: results,
+            metadata: {
+              fileType: 'csv',
+              processed: true,
+              extractedAt: new Date().toISOString(),
+              rowCount: results.length,
+              columnCount: headers.length
+            }
+          });
+        })
+        .on('error', (error) => {
+          reject(error);
+        });
+    });
+  }
+
+  async generateFormFromCSV(headers, database, filename) {
+    const formFields = headers.map(header => ({
+      name: header.trim(),
+      label: header.trim().replace(/[_-]/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
+      type: 'text',
+      required: true
+    }));
+
+    const formId = uuidv4();
+    const webLink = `${process.env.RENDER_EXTERNAL_URL || 'http://localhost:3000'}/form/${formId}`;
+
+    const form = {
+      id: formId,
+      name: `Form generated from ${filename}`,
+      fields: JSON.stringify(formFields),
+      database_name: database,
+      webLink: webLink,
+      createdDate: new Date().toISOString(),
+      source: 'csv'
+    };
+
+    await this.saveForm(form);
+
+    return {
+      id: formId,
+      name: form.name,
+      fields: formFields,
+      database: database,
+      webLink: webLink,
+      createdDate: form.createdDate
+    };
+  }
+
+  generateFormHTML(formName, fields, formId) {
+    const fieldsHTML = fields.map(field => `
+      <div class="mb-4">
+        <label class="block text-sm font-medium text-gray-700 mb-2">${field.label}:</label>
+        <input 
+          type="${field.type}" 
+          name="${field.name}" 
+          ${field.required ? 'required' : ''}
+          class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+      </div>
+    `).join('');
+
+    return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${formName}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100">
+    <div class="min-h-screen flex items-center justify-center">
+        <div class="max-w-md w-full bg-white rounded-lg shadow-md p-6">
+            <h1 class="text-2xl font-bold text-gray-900 mb-6">${formName}</h1>
+            
+            <form id="submissionForm">
+                ${fieldsHTML}
+                
+                <button type="submit" class="w-full bg-blue-500 text-white py-2 px-4 rounded-md hover:bg-blue-600 transition-colors">
+                    Submit
+                </button>
+            </form>
+            
+            <div id="status" class="mt-4"></div>
+        </div>
+    </div>
+
+    <script>
+        document.getElementById('submissionForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const formData = new FormData(e.target);
+            const data = Object.fromEntries(formData.entries());
+            
+            const statusDiv = document.getElementById('status');
+            statusDiv.innerHTML = '<p class="text-blue-600">Submitting...</p>';
+            
+            try {
+                const response = await fetch('/api/form/${formId}/submit', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(data)
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    statusDiv.innerHTML = '<p class="text-green-600">Form submitted successfully!</p>';
+                    e.target.reset();
+                } else {
+                    statusDiv.innerHTML = '<p class="text-red-600">Error: ' + result.error + '</p>';
+                }
+            } catch (error) {
+                statusDiv.innerHTML = '<p class="text-red-600">Error: ' + error.message + '</p>';
+            }
+        });
+    </script>
+</body>
+</html>
+    `;
+  }
+
+  async start() {
+    // Start Express server
+    const PORT = process.env.PORT || 3000;
+    this.app.listen(PORT, '0.0.0.0', () => {
+      console.log(`🚀 Document Database System running on port ${PORT}`);
+      console.log(`📊 Dashboard: http://localhost:${PORT}`);
+      console.log(`💾 Database: In-memory SQLite`);
+      console.log(`📁 File uploads: ./uploads/`);
+      console.log(`✅ System ready for use!`);
+    });
+
+    // Start MCP server if in MCP mode
+    if (process.env.MCP_MODE === 'true') {
+      const transport = new StdioServerTransport();
+      await this.mcpServer.connect(transport);
+      console.log('🔌 MCP Server connected and ready for Claude Pro');
+    }
+  }
+}
+
+// Start the server
+const system = new DocumentDatabaseSystem();
+system.start();
